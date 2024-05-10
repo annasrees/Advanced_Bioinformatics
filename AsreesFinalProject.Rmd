@@ -1,0 +1,1428 @@
+---
+title: "AsreesFinalProject"
+author: "Anna Rees"
+date: "2024-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+# Introduction and Background
+  As transcriptomics and next-gen sequencing expands in affordability and technology, the amount of gene expression data available explodes. Bioinformatic tools like HISAT2 and STAR were created with the intention of streamlining the bioinformatic pipeline and to more easily quantify gene expression. HISAT2 and STAR are two of the most prominent read alignment tools. It is important to understand the key differences in performance when comparing HISAT to STAR, as their alignment is a quintessential aspect of the process, and much of the results of these bioinformatic analyses hinge on the accuracy and precision of these aligners.
+
+## Information on the data
+  In order to assess the performance of these two aligners, I have chosen a dataset which came from a study on the heterogeneity in a mouse model of metastatic breast cancer (accession number GSE165393). 
+  GSE165393 is a dataset of organ-derived metastatic cell lines that were harvested from 10 female MMTV-PyMT mice. MMTV-PyMT female mice develop palpable mammary tumors which metastasize to the lung. Tumor-bearing organs from these mice were harvested for sample collection. These cell lines were isolated and sorted based on the expression of surface cancer markers, specifically CD44low/EpCAMhigh or CD44high/EpCAMhigh with previously sorted cell lines used as positive controls for comparison. To acquire the raw data for bulk RNA sequencing, total RNA was extracted using the QIAGEN RNeasy kit, with 2 distinct clonal isolate replicates per sample. A modified SMART-seq2 protocol was used to generate cDNA, and the Nextera XT DNA Sample Prep Kit was used to build Illumina libraries. Samples were then sequenced on a NextSeq500 with a minimum depth of 10 M reads.
+
+
+This dataset is a compilation of counts files from 8 samples of mice tissue, which all have different treatments:
+
+1. SRR13515350 - Bone Marrow, CD44 low (rep 1)
+2. SRR13515351 - Bone Marrow, CD44 low (rep 2)
+3. SRR13515352 - Bone Marrow, CD44 high (rep 1)
+4. SRR13515353 - Bone Marrow, CD44 high (rep 2)
+5. SRR13515354 - Lymph Node, CD44 low (rep 1)
+6. SRR13515355 - Lymph Node, CD44 low (rep 2)
+7. SRR13515356 - Lymph Node, CD44 High (rep 1)
+8. SRR13515357 - Lymph Node, CD44 High (rep 2)
+
+Each sample is either from Bone Marrow (BM), or Lymph Node (LN) tissue. The mouse either had high levels of CD44, a cell surface marker, or low levels of CD44.
+
+The goal of this analysis is to compare and contrast HISAT2 aligner with STAR aligner. To do this, I will conduct differential expression (DE) analysis on counts files created by HISAT2 and STAR on the same dataset, simultaneously.
+
+# Analyzing RNA-Seq with DESeq2
+
+### Load required libraries
+```{r}
+#BiocManager::install("limma")
+#BiocManager::install("sva")
+
+library(knitr)
+library(DESeq2) 
+library(RColorBrewer)
+library(pheatmap)
+library(ggplot2)
+library(tidyverse)
+library(pheatmap)
+library(cowplot)
+library(tidyr)
+library(dplyr)
+library(patchwork)
+library(ggplotify)
+library(DESeq2)
+library(ggvenn)
+library(limma)
+
+```
+
+### htseq-count input
+```{r sampleTables}
+Hdirectory <- "~/final_proj/Rstudio/counts3/hisat2CountsFiles"  ##path to where HTseq counts are 
+
+Sdirectory <- "~/final_proj/Rstudio/counts3/star" 
+
+sampleTableHisat <- read.csv("~/final_proj/Anna_Rees_Final_Project/counts3/sampleTableHisat.csv", header = T)
+sampleTableStar <- read.csv("~/final_proj/Anna_Rees_Final_Project/counts3/sampleTableStar.csv", header = T)
+
+head(sampleTableStar)
+
+```
+Next, I must specify the columns of interest as factors. For my purposes, this will be the "condition", "Tissue", and "CD44Level" columns
+```{r factors}
+hisatCD44Level <- factor(sampleTableHisat$CD44Level, levels = c("Low", "High"))
+starCD44Level <- factor(sampleTableStar$CD44Level, levels = c("Low", "High"))
+# 
+hisatTissue <- factor(sampleTableHisat$Tissue, levels = c("Bone Marrow", "Lymph Node"))
+starTissue <- factor(sampleTableStar$Tissue, levels = c("Bone Marrow", "Lymph Node"))
+# 
+hisatcondition <- factor(sampleTableHisat$condition, levels = c("BM:Low", "BM:High", "LN:Low", "LN:High"))
+starcondition <- factor(sampleTableStar$condition, levels = c("BM:Low", "BM:High", "LN:Low", "LN:High"))
+
+hisatGroup <- factor(sampleTableHisat$Group)
+starGroup <- factor(sampleTableStar$Group)
+
+```
+
+### DESeq2 Dataset (DDS)
+Firstly, I will create DDSs for HISAT2 and STAR with the CD44 level as the condition. 
+```{r}
+hisat_dds <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTableHisat,
+                                  directory = ".",
+                                  design = ~Group)
+
+
+star_dds <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTableStar,
+                                       directory = ".",
+                                       design = ~Group)
+
+head(hisat_dds)
+
+```
+
+### Pre-filtering
+Pre-filtering low count genes before running DESeq2 functions in order to remove rows with very few reads and to reduce the memory size of the dds data objects
+```{r pre-filtering}
+keepH <- rowSums(counts(hisat_dds)) >= 10
+hisat_dds <- hisat_dds[keepH,]
+
+keepS <- rowSums(counts(star_dds)) >= 10
+star_dds <- star_dds[keepS,]
+
+#Deciding the factor level - "Low" represents the control
+hisat_dds$Group <- relevel(hisat_dds$Group, ref = "BMLow")
+
+```
+
+### Running the Differential Expression Analysis
+```{r DEA}
+hisat_dds <- DESeq(hisat_dds)
+hisat_res <- results(hisat_dds)
+
+star_dds <- DESeq(star_dds)
+star_res <- results(star_dds)
+
+summary(hisat_res)
+summary(star_res)
+```
+### Hierarchical Clustering Heatmap 
+```{r hisat heatmap}
+hisat_rld1 <- rlog(hisat_dds, blind=TRUE)
+hisat_rld_mat1 <- assay(hisat_rld1)  
+hisat_rld_cor1 <- cor(hisat_rld_mat1) 
+heat.colors <- brewer.pal(6, "Blues")
+hisat_heatmap1 <- pheatmap(hisat_rld_cor1, color = heat.colors, main = "HISAT2 Heatmap")
+
+hisat_heatmap1 <- as.ggplot(hisat_heatmap1)
+
+```
+
+```{r star heatmap}
+star_rld1 <- rlog(star_dds, blind=TRUE)
+star_rld_mat1 <- assay(star_rld1)  
+star_rld_cor1 <- cor(star_rld_mat1) 
+heat.colors <- brewer.pal(6, "Blues")
+star_heatmap1 <- pheatmap(star_rld_cor1, color = heat.colors, main = "STAR Heatmap")
+
+star_heatmap1 <- as.ggplot(star_heatmap1)
+
+```
+### Side by Side for the Heatmaps
+```{r, fig.height=6, fig.width=16}
+ggsave(filename = "hisat_heatmap1.png",
+       plot = hisat_heatmap1,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+ggsave(filename = "star_heatmap1.png",
+       plot = star_heatmap1,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_heatmap1, file = "hisat_heatmap1.png")
+saveRDS(star_heatmap1, file = "star_heatmap1.png")
+
+hisat_heatmap_plot <- readRDS("hisat_heatmap1.png")
+star_heatmap_plot <- readRDS("star_heatmap1.png")
+
+figHeatmap <- plot_grid(hisat_heatmap_plot, star_heatmap_plot,
+                        ncol = 2,
+                        labels = "A")
+
+figHeatmap
+```
+
+The correlation heatmaps above show the hierarchical clustering of each condition type in the dataset. It appears there is higher correlation between the LNHigh1 and LNlow1 samples compared to other samples. The HISAT2 heatmap and the STAR heatmap appear to draw similar, although still different, correlations. The high correlation between different samples may be due to noise in the dataset, or unnormalized counts data.
+
+### Principal components analysis (PCA) from the DESeq Results
+
+```{r}
+hisat_vsd <- vst(hisat_dds, blind=FALSE)
+
+plotPCA(hisat_vsd, intgroup=c("Group")) + theme_classic()
+```
+### A better PCA
+I have recreated the PCA above but with better aesthetics
+```{r}
+print(colData(hisat_dds))
+hisat_PCA <- plotPCA(hisat_vsd, intgroup = c("Tissue", "CD44Level"), returnData = TRUE)
+
+percentVar <- round(100 * attr(hisat_PCA, "percentVar"))
+
+hisat_pca_plot <- ggplot(hisat_PCA, aes(PC1, PC2, color=Tissue, shape=CD44Level)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() +
+  ggtitle("PCA Plot of HISAT2 Counts")+
+  theme_classic()
+
+hisat_pca_plot <- as.ggplot(hisat_pca_plot)
+```
+
+```{r}
+star_vsd <- vst(star_dds, blind=FALSE)
+star_PCA <- plotPCA(star_vsd, intgroup = c("Tissue", "CD44Level"), returnData = TRUE)
+
+percentVar <- round(100 * attr(star_PCA, "percentVar"))
+
+star_pca_plot <- ggplot(star_PCA, aes(PC1, PC2, color=Tissue, shape=CD44Level)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() +
+  ggtitle("PCA Plot of STAR Counts")+
+  theme_classic()
+
+star_pca_plot <- as.ggplot(star_pca_plot)
+```
+### Side by Side of the PCA Plots
+```{r side by side, fig.height=6, fig.width=16}
+
+ggsave(filename = "hisat_pca.png",
+       plot = hisat_pca_plot,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+ggsave(filename = "star_pca.png",
+       plot = star_pca_plot,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)  
+
+saveRDS(hisat_pca_plot, file = "hisat_pca.png")
+saveRDS(star_pca_plot, file = "star_pca.png")
+
+hisat_pca_plot <- readRDS("hisat_pca.png")
+star_pca_plot <- readRDS("star_pca.png")
+
+figPCA1 <- plot_grid(hisat_pca_plot, star_pca_plot,
+                    ncol = 2,
+                    labels = "B")
+
+figPCA1
+
+```
+PCA plots provide and understanding of how the features in the data contribute to the principle components, and the distance between points indicates how similar they are in terms of PCA values. This data appears to be highly variable, as the plot points are widely spread across the plot. Interestingly, the samples seem to cluster somewhat by tissue type rather than by CD44 type. This indicates there may be a stronger relationship between gene expression and the source tissue than between the gene expression and CD44 level. Again, the HISAT2 data and the STAR data seem to cluster in similar ways, although the variance for each PCA variable is slightly different.
+
+### Combining heatmap and PCA visualizations
+```{r, fig.height=15, fig.width=20}
+figPCA_Heatmap <- plot_grid(figHeatmap, figPCA1,
+                            nrow = 2)
+
+figPCA_Heatmap
+```
+
+
+```{r}
+hisat_res <- results(hisat_dds, contrast=c('Group', 'BMHigh', 'BMLow')) 
+head(hisat_res)
+dim(hisat_res)
+```
+
+
+```{r}
+hisat_result <- hisat_res[order(hisat_res$padj), ]
+head(hisat_result)
+```
+
+
+```{r}
+table(hisat_result$padj<0.05)
+```
+Doing the same for STAR
+```{r}
+star_res <- results(star_dds, contrast=c('Group', 'BMHigh', 'BMLow')) 
+head(star_res)
+dim(star_res)
+
+star_result <- star_res[order(star_res$padj), ]
+head(star_result)
+
+table(star_result$padj<0.05)
+
+```
+
+
+```{r}
+hisat_resdata <- merge(as.data.frame(hisat_result), as.data.frame(counts(hisat_dds, normalized=TRUE)), by="row.names", sort=FALSE)
+names(hisat_resdata)[1] <- "Gene_id"
+head(hisat_resdata)
+
+#write results
+write.csv(hisat_resdata, file="HISAT_BMHighvsBMLow _unfiltered_matrix.csv")
+```
+
+```{r}
+star_resdata <- merge(as.data.frame(star_result), as.data.frame(counts(star_dds, normalized=TRUE)), by="row.names", sort=FALSE)
+names(star_resdata)[1] <- "Gene_id"
+head(star_resdata)
+
+#write results
+write.csv(star_resdata, file="STAR_BMHighvsBMLow _unfiltered_matrix.csv")
+
+```
+
+
+Now, getting a list of DEGs and filtering for rows which meet the criteria of having an absolute log2FC of 1 and padj of less than 0.05.
+
+```{r}
+#Get DEG up/down lists
+hisat_resdata_DEGs <- as.data.frame(hisat_result) %>% dplyr::filter(abs(log2FoldChange) > 1 & padj < 0.05) %>% tibble::rownames_to_column("Gene_id")
+
+star_resdata_DEGs <- as.data.frame(star_result) %>% dplyr::filter(abs(log2FoldChange) > 1 & padj < 0.05) %>% tibble::rownames_to_column("Gene_id")
+
+#write results
+write.csv(star_resdata_DEGs, "STAR_CD44LowVsHigh_log2fc1_fdr05_DEGlist.csv", row.names = FALSE)
+write.csv(hisat_resdata_DEGs, "HISAT_CD44LowVsHigh_log2fc1_fdr05_DEGlist.csv", row.names = FALSE)
+
+head(hisat_resdata_DEGs)
+
+```
+# Volcano plots
+The following plots are taken inspiration from Fig. 6 in Raplee et. al. 
+
+The goal of the volcano plots is to identify genes of significance by the p-adjusted values. 
+
+```{r}
+# Add Threshold column based on criteria
+hisat_resdata$threshold <- abs(hisat_resdata$log2FoldChange) >= 1 & hisat_resdata$padj < 0.05
+
+
+hisat_threshold_padj <- hisat_resdata$padj < 0.05 
+## Which values in an object are considered true and what is the length?? 
+
+length(which(hisat_threshold_padj))
+
+
+
+```
+```{r}
+# Add Threshold column based on criteria
+star_resdata$threshold <- abs(star_resdata$log2FoldChange) >= 1 & star_resdata$padj < 0.05
+
+
+star_threshold_padj <- star_resdata$padj < 0.05 
+## Which values in an object are considered true and what is the length?? 
+
+length(which(star_threshold_padj))
+
+str(star_resdata)
+
+```
+
+
+The labels 
+```{r}
+
+
+hisatVolcano1 <- ggplot(hisat_resdata) +
+        geom_point(aes(x=log2FoldChange, 
+                       y=-log10(padj), colour=threshold)) + 
+  theme_classic() + 
+        ggtitle("HISAT2 DEG Expression") +
+        xlab("Log2 fold change") + 
+        ylab("-Log10(padj)") +
+        theme(legend.position = "right",
+              plot.title = element_text(size = rel(1.25), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25))) + 
+  scale_color_manual(values = c("darkslategrey", "magenta"),
+                     labels = c("Not Significant", "Differentially Expressed"))
+
+hisatVolcano1 <- as.ggplot(hisatVolcano1)
+
+ggsave(filename = "hisatVolcano1.png",
+       plot = hisatVolcano1,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisatVolcano1, file = "hisatVolcano1.png")
+
+hisatVolcano1_plot <- readRDS("hisatVolcano1.png")
+
+```
+
+The amount of genes which meet the threshold (a p-adjusted value less than 0.05) is different for the HISAT2 alignment data and the STAR alignment data. From the HISAT2 alignment, we have 76 genes of significance, but from the STAR alignment we only have 1 gene of significance. These results indicate the alignments created varied results 
+which will impact analyses down the line. 
+
+```{r}
+
+starVolanco1 <- ggplot(star_resdata) +
+  geom_point(aes(x=log2FoldChange, 
+                 y=-log10(padj), colour=threshold)) +  # Add labels
+  theme_classic() + 
+  ggtitle("STAR DEG Expression") +
+  xlab("Log2 fold change") + 
+  ylab("-Log10(padj)") +
+  theme(legend.position = "right",
+        plot.title = element_text(size = rel(1.25), hjust = 0.5), 
+        axis.title = element_text(size = rel(1.25))) + 
+  scale_color_manual(values = c("darkslategrey", "magenta"),
+                     labels = c("Not Significant", "Differentially Expressed"))
+
+starVolanco1 <- as.ggplot(starVolanco1)
+
+ggsave(filename = "starVolanco1.png",
+       plot = starVolanco1,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(starVolanco1, file = "starVolanco1.png")
+
+starVolanco1_plot <- readRDS("starVolanco1.png")
+
+```
+For both the HISAT and STAR volcano plots, you can see that (before the batch correction) all the DEGs were upregulated.
+
+```{r, fig.height=6, fig.width=16}
+volcanoes1 <- plot_grid(hisatVolcano1_plot, starVolanco1_plot,
+                        ncol = 2,
+                        labels = "C")
+
+volcanoes1
+```
+The volcano plots above indicates the statistical significance of each of the genes according to the results of the HISAT and STAR analysis. Genes that are either up or downregulated are labeled in magenta, and all other genes are gray. Both plots show that the only differentially expressed genes are upregulated, and that there are very very few genes of significance (further emphasized by the venn diagram below)
+
+# Venn Diagrams
+generating a venn diagram comparing the DEGs identified by HISAT2 vs STAR
+```{r}
+# Extract genes marked as differentially expressed in each dataset
+hisat_threshold_genes <- subset(hisat_resdata, threshold)$Gene_id
+star_threshold_genes <- subset(star_resdata, threshold)$Gene_id
+
+# Create a list of gene IDs for both datasets
+gene_lists <- list(
+  HISAT2 = hisat_threshold_genes,
+  STAR = star_threshold_genes
+)
+
+# Plot the Venn diagram
+ggvenn(data = gene_lists)
+```
+
+In the original literature from which this dataset was derived, the authors found 5,509 DEGs from 8 distinct gene clusters using STAR. Since the results from this analysis are so different to the analysis seen above, this data clearly indicates a batch correction is necessary for the most accurate analysis. That being said, for the purposes of assessing the results drawn from HISAT2 vs STAR, it is clear the results are very different depending on the aligner chosen. 
+
+Genes of interest as they are indicated above:
+
+STAR's one DEG is ENSMUSG00000019831.15
+  This is gene **Wasf1**, a protein coding gene. Mutations in this gene have been associated with defects in the central nervous system. The protein it encodes is an actin binding protein
+  This gene **was** identified as a DEG from HISAT2, which is why there is indicated crossover in the Venn diagram above. 
+  source: https://useast.ensembl.org/Mus_musculus/Gene/Summary?db=core;g=ENSMUSG00000019831;r=10:40759471-40814566
+  
+The 3 remaining DEGs identified only by HISAT2 are:
+- ENSMUSG00000003135.16: **Cnot11**
+  This is another protein coding gene for the CCR4-NOT transcription complex subunit 11. It is predicted to act upstream of or within regulation of translation and regulatory ncRNA-mediated gene silencing.
+  source: https://www.informatics.jax.org/marker/MGI:106580
+  
+- ENSMUSG00000027637.4: **Rab5if**
+  This is a protein coding factor for the RAB5 interacting factor, which is a part of the GEL complex subunit OPTI. It is involved in mitochondrial repirasome assembly
+  source: https://www.informatics.jax.org/marker/MGI:1914638
+  
+- ENSMUSG00000047843: **Bri3**
+  This is a protein coding gene for the I3 brain protein, which is predicted to enable identical protein binding activity
+  source: https://www.informatics.jax.org/marker/MGI:1933174
+  
+Because the results at this stage are evident to be symptomatic of some batch effect, I will next conduct a batch correction. I will use the sva package, which provides methods for removing batch effects from RNA-seq data
+
+
+# Batch Correction
+To aid in this process, I used the following resources:
+1. The SVA package for removing batch effects and other ... (n.d.). https://bioconductor.org/packages/release/bioc/vignettes/sva/inst/doc/sva.pdf 
+2. Ram, & Lj. (n.d.). Removing batch effects using combat and SVA. Bioinformatics Answers. https://www.biostars.org/p/196430/  
+```{r}
+# Load necessary libraries
+library(sva)
+
+# Extract counts matrix from HISAT2 and STAR datasets
+hisat_counts <- counts(hisat_dds, normalized = TRUE)
+star_counts <- counts(star_dds, normalized = TRUE)
+
+hisat_counts <- as.data.frame(hisat_counts)
+star_counts <- as.data.frame(star_counts)
+
+# Perform batch correction for HISAT2 data
+hisat_corrected <- ComBat(dat = hisat_counts, batch = hisatGroup, par.prior = TRUE, prior.plots = FALSE)
+
+hisat_corrected <- as.data.frame(hisat_corrected)
+
+
+# Perform batch correction for STAR data
+star_corrected <- ComBat(dat = star_counts, batch = starGroup, par.prior = TRUE, prior.plots = FALSE)
+
+star_corrected <- as.data.frame(star_corrected)
+
+
+head(star_corrected)
+```
+After this batch correction, I must redo the visualizations above to see if the results are better. 
+
+## Recreating DESeq2 datasets (DDS) using the corrected data.
+
+First, I need to manage the transformed data for negative values since these arose during the batch correction. To deal with these, I chose to replace the values with 0.
+
+Additionally, due to floating-point arithmetic in the data processing, the counts values are now floating point integers. In an abundance of caution to not disturb the quality of the data, I will create new dataframes for these more useable batch corrected counts values
+```{r}
+hisat_rounded <- hisat_corrected
+star_rounded <- star_corrected
+
+# Replace negative values with zero
+hisat_rounded[hisat_rounded < 0] <- 0
+star_rounded[star_rounded < 0] <- 0
+
+hisat_rounded <- round(hisat_rounded)
+star_rounded <- round(star_rounded)
+
+head(star_rounded)
+```
+
+
+```{r}
+# Recreate DESeq2 datasets (DDS) using the corrected data
+hisat_dds_corrected <- DESeqDataSetFromMatrix(countData = hisat_rounded,
+                                              colData = colData(hisat_dds),
+                                              design = ~ Group)
+
+star_dds_corrected <- DESeqDataSetFromMatrix(countData = star_rounded,
+                                             colData = colData(star_dds),
+                                             design = ~ Group)
+
+# Run differential expression analysis
+hisat_dds_corrected <- DESeq(hisat_dds_corrected)
+star_dds_corrected <- DESeq(star_dds_corrected)
+```
+
+
+### Recreating Hierarchical Clustering Heatmap
+ 
+```{r}
+hisat_rld <- rlog(hisat_dds_corrected, blind=TRUE)
+hisat_rld_mat <- assay(hisat_rld)  
+hisat_rld_cor <- cor(hisat_rld_mat) 
+heat.colors <- brewer.pal(6, "Blues")
+hisat_heatmap <- pheatmap(hisat_rld_cor, color = heat.colors, main = "HISAT2 Corrected Heatmap")
+
+hisat_heatmap <- as.ggplot(hisat_heatmap)
+ggsave(filename = "hisat_heatmap_corrected.png",
+       plot = hisat_heatmap,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_heatmap, file = "hisat_heatmap_corrected.png")
+
+hisat_heatmap_corrected_plot <- readRDS("hisat_heatmap_corrected.png")
+
+```
+```{r}
+star_rld <- rlog(star_dds_corrected, blind=TRUE)
+star_rld_mat <- assay(star_rld)  
+star_rld_cor <- cor(star_rld_mat) 
+heat.colors <- brewer.pal(6, "Blues")
+star_heatmap <- pheatmap(star_rld_cor, color = heat.colors, main = "STAR Corrected Heatmap")
+
+star_heatmap <- as.ggplot(star_heatmap)
+
+ggsave(filename = "star_heatmap_corrected.png",
+       plot = star_heatmap,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_heatmap, file = "star_heatmap_corrected.png")
+
+star_heatmap_corrected_plot <- readRDS("star_heatmap_corrected.png")
+
+```
+
+```{r, fig.height=15, fig.width=20}
+corrected_heatmaps <- plot_grid(hisat_heatmap_corrected_plot, star_heatmap_corrected_plot,
+                                ncol = 2)
+heatmaps_combined <- plot_grid(figHeatmap, corrected_heatmaps,
+                               nrow = 2,
+                               labels = "D")
+heatmaps_combined
+
+```
+Clearly, the batch effect has had an impact on the results of the data. The heatmap provides a sanity check that our batch correction has worked, and the correlations between the samples are showing what we would expect; very strong correlation between the same samples, and a weaker correlation between more different samples. Correlations which were very strong before the batch correction are no longer appearing as correlated
+
+## Recreating PCAs
+
+```{r}
+hisat_vsd <- vst(hisat_dds_corrected, blind=FALSE)
+
+hisat_PCA <- plotPCA(hisat_vsd, intgroup = c("Tissue", "CD44Level"), returnData = TRUE)
+
+percentVar <- round(100 * attr(hisat_PCA, "percentVar"))
+
+hisat_pca_plot <- ggplot(hisat_PCA, aes(PC1, PC2, color=Tissue, shape=CD44Level)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() +
+  ggtitle("PCA Plot of HISAT2 Counts (corrected)")+
+  theme_classic()
+
+hisat_pca_plot <- as.ggplot(hisat_pca_plot)
+ggsave(filename = "hisat_pca_plot_corrected.png",
+       plot = hisat_pca_plot,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_pca_plot, file = "hisat_pca_plot_corrected.png")
+hisat_pca_corrected_plot <- readRDS("hisat_pca_plot_corrected.png")
+
+```
+
+```{r}
+star_vsd <- vst(star_dds_corrected, blind=FALSE)
+star_PCA <- plotPCA(star_vsd, intgroup = c("Tissue", "CD44Level"), returnData = TRUE)
+
+percentVar <- round(100 * attr(star_PCA, "percentVar"))
+
+star_pca_plot <- ggplot(star_PCA, aes(PC1, PC2, color=Tissue, shape=CD44Level)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() +
+  ggtitle("PCA Plot of STAR Counts (corrected)")+
+  theme_classic()
+
+star_pca_plot <- as.ggplot(star_pca_plot)
+
+ggsave(filename = "star_pca_plot_corrected.png",
+       plot = star_pca_plot,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_pca_plot, file = "star_pca_plot_corrected.png")
+star_pca_corrected_plot <- readRDS("star_pca_plot_corrected.png")
+```
+```{r, fig.height=6, fig.width=16}
+corrected_PCAs <- plot_grid(hisat_pca_corrected_plot, star_pca_corrected_plot,
+                            ncol = 2,
+                            labels = "E")
+
+corrected_PCAs
+```
+```{r, fig.height=15, fig.width=20}
+combined_PCAs <- plot_grid(figPCA1, corrected_PCAs,
+                           nrow = 2)
+combined_PCAs
+```
+
+With the corrected data, the PCAs indicate clustering between the lymph node samples, and less so between the bone marrow samples. The samples are still very far apart, and there is less variance in the PCA variables in the corrected values compared ot the uncorrected values.
+
+
+Since I have performed a batch correction, the padj values are all 1. This is, of course, no longer a good metric to assess genes of significance. Instead, I will use the p-values < 0.05 and keep the L2FC values > 1 to identify genes of significance post batch correction. 
+
+```{r}
+hisat_res <- results(hisat_dds_corrected, contrast=c('Group', 'BMHigh', 'BMLow')) 
+head(hisat_res)
+dim(hisat_res)
+```
+
+
+```{r}
+hisat_result_corrected <- hisat_res[order(hisat_res$pvalue), ]
+head(hisat_result_corrected)
+```
+
+
+```{r}
+table(hisat_result_corrected$pvalue<0.05)
+```
+Doing the same for STAR
+
+```{r}
+star_res <- results(star_dds_corrected, contrast=c('Group', 'BMHigh', 'BMLow')) 
+head(star_res)
+dim(star_res)
+
+star_result_corrected <- star_res[order(star_res$pvalue), ]
+head(star_result_corrected)
+```
+
+```{r}
+table(star_result_corrected$pvalue<0.05)
+
+```
+
+
+```{r}
+hisat_resdata_corrected <- merge(as.data.frame(hisat_result_corrected), as.data.frame(counts(hisat_dds_corrected, normalized=TRUE)), by="row.names", sort=FALSE)
+names(hisat_resdata_corrected)[1] <- "Gene_id"
+head(hisat_resdata_corrected)
+
+#write results
+write.csv(hisat_resdata_corrected, file="CORRECTED_HISAT_BMHighvsBMLow _unfiltered_matrix.csv")
+```
+
+```{r}
+star_resdata_corrected <- merge(as.data.frame(star_result_corrected), as.data.frame(counts(star_dds_corrected, normalized=TRUE)), by="row.names", sort=FALSE)
+names(star_resdata_corrected)[1] <- "Gene_id"
+head(star_resdata_corrected)
+
+#write results
+write.csv(star_resdata_corrected, file="CORRECTED_STAR_BMHighvsBMLow _unfiltered_matrix_CORRECTED.csv")
+
+```
+
+
+Now, getting a list of DEGs and filtering for rows which meet the criteria of having an absolute log2FC of 1 and padj of less than 0.05.
+
+```{r}
+#Get DEG up/down lists
+hisat_resdata_DEGs <- as.data.frame(hisat_result_corrected) %>% dplyr::filter(abs(log2FoldChange) > 1 & pvalue < 0.05) %>% tibble::rownames_to_column("Gene_id")
+
+star_resdata_DEGs <- as.data.frame(star_result_corrected) %>% dplyr::filter(abs(log2FoldChange) > 1 & pvalue < 0.05) %>% tibble::rownames_to_column("Gene_id")
+
+#write results
+write.csv(star_resdata_DEGs, "CORRECTED_STAR_CD44LowVsHigh_log2fc1_fdr05_DEGlist.csv", row.names = FALSE)
+write.csv(hisat_resdata_DEGs, "CORRECTED_HISAT_CD44LowVsHigh_log2fc1_fdr05_DEGlist.csv", row.names = FALSE)
+
+head(hisat_resdata_DEGs)
+
+```
+
+## Recreating volcano plots
+
+The following volcano plots were created with the pvalue < 0.05 and L2FC > 1, which is an adjustment for the batch correction and different from the original volcano plots, which used padj < 0.05 and L2FC > 1
+```{r}
+# Add Threshold column based on criteria
+hisat_resdata_corrected$threshold <- abs(hisat_resdata_corrected$log2FoldChange) >= 1 & hisat_resdata_corrected$pvalue < 0.05
+
+
+hisat_threshold_pvalue <- hisat_resdata_corrected$pvalue < 0.05 
+## Which values in an object are considered true and what is the length?? 
+
+length(which(hisat_threshold_pvalue))
+
+```
+
+```{r}
+# Add Threshold column based on criteria
+star_resdata_corrected$threshold <- abs(star_resdata_corrected$log2FoldChange) >= 1 & star_resdata_corrected$pvalue < 0.05
+
+
+star_threshold_pvalue <- star_resdata_corrected$pvalue < 0.05 
+## Which values in an object are considered true and what is the length?? 
+
+length(which(star_threshold_pvalue))
+
+str(star_resdata_corrected)
+
+```
+
+```{r}
+hisat_corrected_volcano <- ggplot(hisat_resdata_corrected) +
+        geom_point(aes(x=log2FoldChange, 
+                       y=-log10(pvalue), colour=threshold)) + 
+  theme_classic() + 
+        ggtitle("HISAT2 DEG Expression (corrected)") +
+        xlab("Log2 fold change") + 
+        ylab("-Log10(p-value)") +
+        theme(legend.position = "right",
+              plot.title = element_text(size = rel(1.25), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25))) + 
+  scale_color_manual(values = c("darkslategrey", "magenta"),
+                     labels = c("Not Significant", "Differentially Expressed")) +
+  ylim(0, 2)
+                     
+ggsave(filename = "hisat_corrected_volcano.png",
+       plot = hisat_corrected_volcano,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_corrected_volcano, file = "hisat_corrected_volcano.png")
+
+hisat_corrected_volcano_plot <- readRDS("hisat_corrected_volcano.png")
+```
+
+
+```{r}
+star_corrected_volcano <- ggplot(star_resdata_corrected) +
+        geom_point(aes(x=log2FoldChange, 
+                       y=-log10(pvalue), colour=threshold)) + 
+  theme_classic() + 
+        ggtitle("STAR DEG Expression (corrected)") +
+        xlab("Log2 fold change") + 
+        ylab("-Log10(pvalue)") +
+        theme(legend.position = "right",
+              plot.title = element_text(size = rel(1.25), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25))) + 
+  scale_color_manual(values = c("darkslategrey", "magenta"),
+                     labels = c("Not Significant", "Differentially Expressed"))  +
+  ylim(0, 2)
+
+
+ggsave(filename = "star_corrected_volcano.png",
+       plot = star_corrected_volcano,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_corrected_volcano, file = "star_corrected_volcano.png")
+
+star_corrected_volcano_plot <- readRDS("star_corrected_volcano.png")
+```
+```{r, fig.height=6, fig.width=20}
+corrected_volcanos <- plot_grid(hisat_corrected_volcano_plot, star_corrected_volcano_plot,
+                                ncol = 2,
+                                labels = "F")
+
+corrected_volcanos
+```
+
+Identified as a DEG by **both** aligners:
+
+
+* ENSMUSG00000031144.16 - syp
+    + Downregulated
+* ENSMUSG00000046337.18 - Fam178b
+    + Downregulated
+* ENSMUSG00000109051.2  - Gm44913
+    + Upregulated
+* ENSMUSG00000038583.14 - Pln
+    + Downregulated
+* ENSMUSG00000108688.2  - Gm44985
+    + Downregulated
+* ENSMUSG00000109302.2  - Gm44967
+    + Upregulated
+
+Identified by HISAT2 only:
+
+* ENSMUSG00000044788.11
+    + Upregulated
+* ENSMUSG00000083906.2
+    + Upregulated
+* ENSMUSG00000044231.4
+    + Upregulated
+* ENSMUSG00000080801.3
+    + Upregulated
+
+Identified by STAR only:
+
+* ENSMUSG00000060989.9
+    + Upregulated
+* ENSMUSG00000100927.2
+    + Upregulated
+* ENSMUSG00000082194.4
+    + Upregulated
+* ENSMUSG00000104843.2
+    + Upregulated
+* ENSMUSG00000084989.4
+    + Downregulated
+  
+```{r}
+# For HISAT data
+hisat_upregulated <- hisat_resdata_corrected$Gene_id[hisat_resdata_corrected$threshold & hisat_resdata_corrected$log2FoldChange > 0]
+hisat_downregulated <- hisat_resdata_corrected$Gene_id[hisat_resdata_corrected$threshold & hisat_resdata_corrected$log2FoldChange < 0]
+
+# For STAR data
+star_upregulated <- star_resdata_corrected$Gene_id[star_resdata_corrected$threshold & star_resdata_corrected$log2FoldChange > 0]
+star_downregulated <- star_resdata_corrected$Gene_id[star_resdata_corrected$threshold & star_resdata_corrected$log2FoldChange < 0]
+
+hisat_upregulated
+```
+```{r}
+hisat_downregulated
+```
+
+
+```{r}
+star_upregulated
+```
+
+
+```{r}
+star_downregulated
+```
+
+
+The amount of genes which meet the threshold (a p-adjusted value less than 0.05) is different for the HISAT2 alignment data and the STAR alignment data. From the HISAT2 alignment, we have 10 genes of significance, and from the STAR alignment we have 11 gene of significance. As is shown in the Venn Diagram below, these DEGs the two aligners have identified are not all the same. In fact, only 40% of the DEGs found are the same between the two aligners. Based on the aligner used, which genes are considered differentially expressed are much different.
+
+## Corrected Venn Diagrams
+generating a venn diagram comparing the DEGs identified by HISAT2 vs STAR. I want to identify what genes each aligner considers a DEG
+```{r}
+# Extract genes marked as differentially expressed in each dataset
+hisat_threshold_genes_corrected <- subset(hisat_resdata_corrected, threshold)$Gene_id
+star_threshold_genes_corrected <- subset(star_resdata_corrected, threshold)$Gene_id
+
+# Create a list of gene IDs for both datasets
+gene_lists <- list(
+  HISAT2 = hisat_threshold_genes_corrected,
+  STAR = star_threshold_genes_corrected
+)
+
+# Plot the Venn diagram
+ggvenn(data = gene_lists)
+
+```
+To summarize the venn diagram's findings below:
+
+
+```{r}
+hisat_threshold_genes_corrected
+
+```
+```{r}
+star_threshold_genes_corrected
+
+```
+The results of HISAT and STAR alignments look much more similar after the batch correction, but there are still significant differences in what each aligner found to be a DEG.
+
+# Boxplots
+For the sake of simplicity, the following boxplots are created for the genes which both HISAT2 and STAR agree are differentially expressed, after batch correction.
+
+### Data Transformation
+```{r}
+hisat_all_matrix <- subset(hisat_resdata_corrected, threshold)
+star_all_matrix <- subset(star_resdata_corrected, threshold)
+
+
+hisat_symbol_deg <- hisat_all_matrix %>% select(Gene_id, BMLow1:LNHigh2)
+star_symbol_deg <- star_all_matrix %>% select(Gene_id, BMLow1:LNHigh2)
+```
+
+```{r}
+hisat_expression_plot <- pivot_longer(hisat_symbol_deg,
+                                cols = 2:9,
+                                values_to = "normalized_counts")
+
+star_expression_plot <- pivot_longer(star_symbol_deg,
+                                cols = 2:9,
+                                values_to = "normalized_counts")
+
+head(hisat_expression_plot)
+```
+
+```{r}
+combined_expression_plot <- left_join(x = hisat_expression_plot, 
+                             y = star_expression_plot, 
+                             by = "Gene_id")
+
+head(combined_expression_plot)
+
+```
+
+
+### Agreed DEGs boxplots
+I chose to plot each DEG based on the aligner and the condition. Each boxplot has a y-axis scale of (0,20) and each value deals with the normalized counts values 
+
+```{r, fig.height=10, fig.width=10}
+hisat_syp_plot <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000031144.16")
+
+hisat_syp <- ggplot(hisat_syp_plot) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT syp") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_syp.png",
+       plot = hisat_syp,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_syp, file = "hisat_syp.png")
+hisat_syp <- readRDS("hisat_syp.png")
+
+# ----------------------------------------------
+
+star_syp_plot <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000031144.16")
+
+star_syp <- ggplot(star_syp_plot) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR syp") + 
+  ylim(0, 20)
+
+ggsave(filename = "star_syp.png",
+       plot = star_syp,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_syp, file = "star_syp.png")
+star_syp <- readRDS("star_syp.png")
+
+syp_plot <- plot_grid(hisat_syp, star_syp,
+                      nrow = 2,
+                      labels = "G")
+
+syp_plot
+
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Fam178b_plot <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000046337.18")
+
+hisat_Fam178b <- ggplot(hisat_Fam178b_plot) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Fam178b") + 
+  ylim(0, 20)
+
+
+ggsave(filename = "hisat_Fam178b.png",
+       plot = hisat_Fam178b,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Fam178b, file = "hisat_Fam178b.png")
+hisat_Fam178b <- readRDS("hisat_Fam178b.png")
+
+#-----------------------------------------------
+
+star_Fam178b_plot <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000046337.18")
+
+star_Fam178b <- ggplot(star_Fam178b_plot) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Fam178b") + 
+  ylim(0, 20)
+
+ggsave(filename = "star_Fam178b.png",
+       plot = star_Fam178b,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Fam178b, file = "star_Fam178b.png")
+star_Fam178b <- readRDS("star_Fam178b.png")
+
+Fam178b_plots <- plot_grid(hisat_Fam178b, star_Fam178b,
+                           nrow = 2,
+                           labels = "H")
+
+Fam178b_plots
+
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Gm44913 <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000109051.2")
+
+hisat_Gm44913 <- ggplot(hisat_Gm44913) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Gm44913") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Gm44913.png",
+       plot = hisat_Gm44913,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Gm44913, file = "hisat_Gm44913.png")
+hisat_Gm44913 <- readRDS("hisat_Gm44913.png")
+
+#-------------------------------------------
+
+star_Gm44913 <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000109051.2")
+
+star_Gm44913 <- ggplot(star_Gm44913) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Gm44913") + 
+  ylim(0, 20)
+
+ggsave(filename = "star_Gm44913.png",
+       plot = hisat_Gm44913,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Gm44913, file = "star_Gm44913.png")
+star_Gm44913 <- readRDS("star_Gm44913.png")
+
+Gm44913_plots <- plot_grid(hisat_Gm44913, star_Gm44913,
+                           nrow = 2,
+                           labels = "I")
+
+Gm44913_plots
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Pln <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000038583.14")
+
+hisat_Pln <- ggplot(hisat_Pln) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Pln") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Pln.png",
+       plot = hisat_Pln,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Pln, file = "hisat_Pln.png")
+hisat_Pln <- readRDS("hisat_Pln.png")
+
+#-------------------------------------
+
+star_Pln <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000038583.14")
+
+star_Pln <- ggplot(star_Pln) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Pln") + 
+  ylim(0, 20)
+
+ggsave(filename = "star_Pln.png",
+       plot = star_Pln,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Pln, file = "star_Pln.png")
+star_Pln <- readRDS("star_Pln.png")
+
+Pln_plots <- plot_grid(hisat_Pln, star_Pln,
+                           nrow = 2,
+                       labels = "J")
+
+Pln_plots
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Gm44985 <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000108688.2")
+
+hisat_Gm44985 <- ggplot(hisat_Gm44985) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Gm44985") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Gm44985.png",
+       plot = hisat_Gm44985,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Gm44985, file = "hisat_Gm44985.png")
+hisat_Gm44985 <- readRDS("hisat_Gm44985.png")
+
+#---------------------------------------
+
+
+star_Gm44985 <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000108688.2")
+
+star_Gm44985 <- ggplot(star_Gm44985) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Gm44985") + 
+  ylim(0, 20)
+
+ggsave(filename = "star_Gm44985.png",
+       plot = star_Gm44985,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Gm44985, file = "star_Gm44985.png")
+star_Gm44985 <- readRDS("star_Gm44985.png")
+
+Gm44985_plot <- plot_grid(hisat_Gm44985, star_Gm44985,
+                           nrow = 2,
+                          labels = "K")
+
+Gm44985_plot
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Gm44967 <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000109302.2")
+
+hisat_Gm44967 <- ggplot(hisat_Gm44967) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Gm44967") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Gm44967.png",
+       plot = hisat_Gm44967,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Gm44967, file = "hisat_Gm44967.png")
+hisat_Gm44967 <- readRDS("hisat_Gm44967.png")
+
+#---------------------------------------------
+
+
+star_Gm44967 <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000109302.2")
+
+star_Gm44967 <- ggplot(star_Gm44967) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Gm44967") + 
+  ylim(0, 20)
+ggsave(filename = "star_Gm44967.png",
+       plot = star_Gm44967,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Gm44967, file = "star_Gm44967.png")
+star_Gm44967 <- readRDS("star_Gm44967.png")
+
+Gm44967_plots <- plot_grid(hisat_Gm44967, star_Gm44967,
+                           nrow = 2,
+                           labels = "L")
+
+Gm44967_plots
+```
+
+All boxplots together
+```{r, fig.height=15, fig.width=60}
+boxplots <- plot_grid(syp_plot, Fam178b_plots, Gm44913_plots, Pln_plots, Gm44985_plot, Gm44967_plots,
+                      ncol = 6)
+
+boxplots
+```
+This figure may be too small to use.
+
+For the most part, the boxplots indicate that the normalized counts the DEGs found for each sample across both aligners are similar. This shows that when the aligners are in concensus, they are both aligning the dataset similarly. Further research is necessary to understand why the aligners results are so different, and what the implications of this could mean for transcriptomics and bioinformatic pipelines moving forward.
+
+## Disagreed DEGs Boxplots
+
+There are several DEGs identified by either HISAT2 or STAR, but not both. I have chosen 2 to examine further:
+
+Identified by HISAT2 only:
+* ENSMUSG00000044788.11 - Fads6
+
+Identified by STAR only:
+* ENSMUSG00000084989.4 - Crocc2
+
+I must first add them to the hisat and star expression plot data
+```{r}
+# Filter out the genes not meeting the threshold
+hisat_additional_genes <- hisat_resdata_corrected %>%
+  filter(Gene_id %in% c("ENSMUSG00000084989.4", "ENSMUSG00000044788.11") & !threshold)
+
+star_additional_genes <- star_resdata_corrected %>%
+  filter(Gene_id %in% c("ENSMUSG00000084989.4", "ENSMUSG00000044788.11") & !threshold)
+
+# Combine additional genes with hisat_expression_plot and star_expression_plot
+hisat_expression_plot <- bind_rows(hisat_expression_plot, 
+                                   pivot_longer(hisat_additional_genes,
+                                                cols = 2:9,
+                                                values_to = "normalized_counts"))
+
+star_expression_plot <- bind_rows(star_expression_plot, 
+                                  pivot_longer(star_additional_genes,
+                                               cols = 2:9,
+                                               values_to = "normalized_counts"))
+
+```
+
+
+```{r, fig.height=10, fig.width=10}
+hisat_Fads6 <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000044788.11")
+
+hisat_Fads6 <- ggplot(hisat_Fads6) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Fads6") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Fads6.png",
+       plot = hisat_Fads6,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Fads6, file = "hisat_Fads6.png")
+hisat_Fads6 <- readRDS("hisat_Fads6.png")
+
+#---------------------------------------------
+
+
+star_Fads6 <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000044788.11")
+
+star_Fads6 <- ggplot(star_Fads6) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Fads6") + 
+  ylim(0, 20)
+ggsave(filename = "star_Fads6.png",
+       plot = star_Fads6,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Fads6, file = "star_Fads6.png")
+star_Fads6 <- readRDS("star_Fads6.png")
+
+Fads6_plots <- plot_grid(hisat_Fads6, star_Fads6,
+                           nrow = 2,
+                         labels = "M")
+
+Fads6_plots
+```
+
+```{r, fig.height=10, fig.width=10}
+hisat_Crocc2 <- hisat_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000084989.4")
+
+hisat_Crocc2 <- ggplot(hisat_Crocc2) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("HISAT Crocc2") + 
+  ylim(0, 20)
+
+ggsave(filename = "hisat_Crocc2.png",
+       plot = hisat_Crocc2,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(hisat_Crocc2, file = "hisat_Crocc2.png")
+hisat_Crocc2 <- readRDS("hisat_Crocc2.png")
+
+#---------------------------------------------
+
+
+star_Crocc2 <- star_expression_plot %>%
+  filter(Gene_id == "ENSMUSG00000084989.4")
+
+star_Crocc2 <- ggplot(star_Crocc2) +
+  geom_boxplot(aes(x=name, 
+                   y=normalized_counts, 
+                   fill=name)) +
+  ggtitle("STAR Crocc2") + 
+  ylim(0, 20)
+ggsave(filename = "star_Crocc2.png",
+       plot = star_Crocc2,
+       units = "in", 
+       width = 5, 
+       height = 6, 
+       dpi = 300)
+
+saveRDS(star_Crocc2, file = "star_Crocc2.png")
+star_Crocc2 <- readRDS("star_Crocc2.png")
+
+Crocc2_plots <- plot_grid(hisat_Crocc2, star_Crocc2,
+                           nrow = 2,
+                          labels = "N")
+
+Crocc2_plots
+```
+
+It appears that when the aligners do not agree on whether a gene is a DEG, they have different results for the normalized counts as well. This means that they aligned the original data differently, and one may have spliced when another didnt.
+
+```{r}
+sessionInfo()
+```
+
